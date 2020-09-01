@@ -44,6 +44,17 @@ int get_total_PUs( hwloc_topology_t topo ){
 	return hwloc_get_nbobjs_by_type ( topo, HWLOC_OBJ_PU );
 }
 
+int confirm_PU_online_by_os_idx( hwloc_topology_t topo, const int pu_os_idx, hwloc_bitmap_t bitmap ){
+	hwloc_obj_t pu_obj = hwloc_get_pu_obj_by_os_index( topo, pu_os_idx );
+	if( NULL != pu_obj ){
+		if( NULL != bitmap ){
+			hwloc_bitmap_or( bitmap, bitmap, pu_obj->cpuset );
+		}
+		return pu_os_idx;
+	}
+	return -1;
+}
+
 /* IN:  topo:  Initialized hwloc_topology_t object
  * 	pkg_os_idx:  The os index of the package in question.
  * INOUT:  bitmap:  If not null, adds the os_index of the selected PU into the
@@ -53,13 +64,20 @@ int get_total_PUs( hwloc_topology_t topo ){
  * 	if no such pkg exists.
  */
 int get_os_idx_of_first_PU_in_PACKAGE( hwloc_topology_t topo, const int pkg_os_idx, hwloc_bitmap_t bitmap ){
-	int puidx;
+	int puidx; 
+	const int total_PUs = get_total_PUs( topo );
 	hwloc_obj_t pu_obj, pkg_obj;
-	for( puidx=0; NULL != (pu_obj = hwloc_get_pu_obj_by_os_index( topo, puidx )); puidx++ ){
+
+	for( puidx=0; puidx < total_PUs; puidx++ ){
+		pu_obj = hwloc_get_pu_obj_by_os_index( topo, puidx );
+		if( NULL == pu_obj ){
+			continue;
+		}
 		pkg_obj  = hwloc_get_ancestor_obj_by_type (topo, HWLOC_OBJ_PACKAGE, pu_obj);
+		assert( NULL != pkg_obj );
 		if( pkg_obj->os_index == pkg_os_idx ){
 			if( NULL != bitmap ){
-				hwloc_bitmap_or( bitmap, bitmap, pu_obj->cpuset )
+				hwloc_bitmap_or( bitmap, bitmap, pu_obj->cpuset );
 			}
 			return pu_obj->os_index;
 		}
@@ -79,13 +97,20 @@ int get_os_idx_of_first_PU_in_PACKAGE( hwloc_topology_t topo, const int pkg_os_i
  */
 int get_os_idx_of_first_PU_in_CORE( hwloc_topology_t topo, const int core_os_idx, const int pkg_os_idx, hwloc_bitmap_t bitmap ){
 	int puidx;
+	const int total_PUs = get_total_PUs( topo );
 	hwloc_obj_t pu_obj, core_obj, pkg_obj;
-	for( puidx=0; NULL != (pu_obj = hwloc_get_pu_obj_by_os_index( topo, puidx )); puidx++ ){
+	for( puidx=0; puidx < total_PUs; puidx++ ){
+		pu_obj = hwloc_get_pu_obj_by_os_index( topo, puidx );
+		if( NULL == pu_obj ){
+			continue;
+		}
 		core_obj = hwloc_get_ancestor_obj_by_type (topo, HWLOC_OBJ_CORE,    pu_obj);
+		assert( NULL != core_obj );
 		pkg_obj  = hwloc_get_ancestor_obj_by_type (topo, HWLOC_OBJ_PACKAGE, pu_obj);
+		assert( NULL != pkg_obj );
 		if( core_obj->os_index == core_os_idx && pkg_obj->os_index == pkg_os_idx){
 			if( NULL != bitmap ){
-				hwloc_bitmap_or( bitmap, bitmap, pu_obj->cpuset )
+				hwloc_bitmap_or( bitmap, bitmap, pu_obj->cpuset );
 			}
 			return pu_obj->os_index;
 		}
@@ -95,7 +120,12 @@ int get_os_idx_of_first_PU_in_CORE( hwloc_topology_t topo, const int core_os_idx
 
 void generate_per_PU_bitmap( hwloc_topology_t topo, hwloc_bitmap_t bitmap ){
 	// FIXME add sanity checks for topo and bitmap
-	hwloc_bitmap_set_range( bitmap, 0, get_total_PUs( topo ) - 1 );
+	
+	int puidx; 
+	const int total_PUs = get_total_PUs( topo );
+	for( puidx=0; puidx < total_PUs; puidx++ ){
+		confirm_PU_online_by_os_idx( topo, puidx, bitmap );
+	}
 }
 
 void generate_per_CORE_bitmap( hwloc_topology_t topo, hwloc_bitmap_t bitmap ){
@@ -120,12 +150,20 @@ void generate_per_PACKAGE_bitmap( hwloc_topology_t topo, hwloc_bitmap_t bitmap )
 }
 
 void dump_hwloc_topology(hwloc_topology_t topo){
-	int puidx;
+	int puidx; 
+	const int total_PUs = get_total_PUs( topo );
 	hwloc_obj_t pu_obj, core_obj, pkg_obj;
 
-	for( puidx=0; NULL != (pu_obj = hwloc_get_pu_obj_by_os_index( topo, puidx )); puidx++ ){
+	for( puidx=0; puidx < total_PUs; puidx++ ){
+		pu_obj   = hwloc_get_pu_obj_by_os_index( topo, puidx );
+		if( NULL == pu_obj ){
+			// Should happen if, e.g., the PU has been taken offline.
+			continue;
+		}
 		core_obj = hwloc_get_ancestor_obj_by_type (topo, HWLOC_OBJ_CORE,    pu_obj);
+		assert( NULL != core_obj ); // Should never trigger.
 		pkg_obj  = hwloc_get_ancestor_obj_by_type (topo, HWLOC_OBJ_PACKAGE, pu_obj);
+		assert( NULL != pkg_obj );  // Should never trigger.
 
 		fprintf(stdout, "PU os_idx=%02d logcal_idx=%02d   ->   CORE os=%02d log=%02d   ->   PACKAGE os=%02d log=%02d\n",
 			pu_obj->os_index, pu_obj->logical_index,
@@ -135,19 +173,45 @@ void dump_hwloc_topology(hwloc_topology_t topo){
 }
 
 int main(){
+	unsigned int index;	// for hwloc bitmap macro.
+	hwloc_bitmap_t pu_bitmap, core_bitmap, pkg_bitmap;
 	hwloc_topology_t topo;
+
 	assert( 0 == hwloc_topology_init(&topo) );
 	assert( 0 == hwloc_topology_load(topo) );
 
+	pu_bitmap = hwloc_bitmap_alloc();  	assert( pu_bitmap );
+	core_bitmap = hwloc_bitmap_alloc();  	assert( core_bitmap );
+	pkg_bitmap = hwloc_bitmap_alloc();  	assert( pkg_bitmap );
+
+	generate_per_PU_bitmap( topo, pu_bitmap );
+	generate_per_CORE_bitmap( topo, core_bitmap );
+	generate_per_PACKAGE_bitmap( topo, pkg_bitmap );
+
+	fprintf(stdout, "Contents of pu_bitmap:  ");
+	hwloc_bitmap_foreach_begin(index,pu_bitmap)
+		fprintf(stdout, "%02d ", index);
+	hwloc_bitmap_foreach_end();
+	fprintf(stdout, "\n");
+
+	fprintf(stdout, "Contents of core_bitmap:  ");
+	hwloc_bitmap_foreach_begin(index,core_bitmap)
+		fprintf(stdout, "%02d ", index);
+	hwloc_bitmap_foreach_end();
+	fprintf(stdout, "\n");
+
+	fprintf(stdout, "Contents of pkg_bitmap:  ");
+	hwloc_bitmap_foreach_begin(index,pkg_bitmap)
+		fprintf(stdout, "%02d ", index);
+	hwloc_bitmap_foreach_end();
+	fprintf(stdout, "\n");
+
 	fprintf(stdout, "I see %d package(s), %d core(s) and %d PUs\n", 
-		get_total_pkgs( topo ),
-		get_total_cores( topo ),
-		get_total_pus( topo ));
+		get_total_PACKAGEs( topo ),
+		get_total_COREs( topo ),
+		get_total_PUs( topo ));
 
 	dump_hwloc_topology(topo);
-	fprintf(stdout, "First pu of pkg=0 is %d\n", get_os_idx_of_first_pu_in_pkg( topo, 0 ) );
-	fprintf(stdout, "First pu of pkg=1 is %d\n", get_os_idx_of_first_pu_in_pkg( topo, 1 ) );
-	fprintf(stdout, "First pu of core=5 on pkg=1 is %d\n", get_os_idx_of_first_pu_in_core( topo, 5, 1 ) );
 	return 0;
 }
 
